@@ -1,0 +1,154 @@
+# ─────────────────────────────────────────────────────────────
+# CI · 정산 시스템  (.github/workflows/ci.yml)
+#
+#   lint → test → build → scan   (4개 job, needs로 순서 연결)
+#
+#   - PR과 main push마다 실행되어 품질 게이트를 통과했는지 검사합니다.
+#   - 이미지는 레지스트리에 올리지 않고 self-hosted runner(실습 VM)의
+#     로컬 docker에 settlement:<커밋 SHA> 태그로 남깁니다.
+#   - main에서 이 워크플로가 성공하면 cd.yml(CD · kind 배포)이 자동으로 이어서 실행됩니다.
+#     ※ cd.yml의 workflows: ["CI · 정산 시스템"] 과 아래 name 이 정확히 같아야 합니다.
+# ─────────────────────────────────────────────────────────────
+name: CI · 정산 시스템
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read            # GITHUB_TOKEN 권한은 최소로
+
+# 같은 브랜치에 새 커밋이 오면 이전 실행 취소 (self-hosted runner 자원 절약)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONPATH: src           # src/ 레이아웃: settlement 패키지를 찾기 위해 필요 (워크북 Part 3·5와 동일)
+  IMAGE_NAME: settlement
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────
+  # 1. 코드 스타일 검사 (ruff + black)
+  # ─────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ruff / black)
+    runs-on: [self-hosted, settlement]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install lint tools
+        run: pip install ruff==0.6.9 black==24.8.0
+
+      - name: Ruff (정적 분석)
+        run: ruff check src/ tests/
+
+      - name: Black (포맷 검사)
+        run: black --check --diff src/ tests/
+
+  # ─────────────────────────────────────────────────────────
+  # 2. pytest + 커버리지 80% 이상
+  # ─────────────────────────────────────────────────────────
+  test:
+    name: Test & Coverage
+    needs: lint
+    runs-on: [self-hosted, settlement]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest with coverage gate (80%)
+        run: |
+          pytest tests/ -v \
+            --cov=settlement \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=80
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────
+  # 3. 멀티스테이지 Docker 빌드 (레지스트리 미사용)
+  # ─────────────────────────────────────────────────────────
+  build:
+    name: Docker Build
+    needs: test
+    runs-on: [self-hosted, settlement]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image (local docker daemon)
+        run: |
+          docker build \
+            -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+            -t "${IMAGE_NAME}:latest" \
+            .
+
+      # scan(ci.yml)과 deploy(cd.yml) 모두 같은 VM의 docker 데몬을 쓰므로
+      # 이미지를 tar 아티팩트로 올릴 필요가 없습니다.
+      - name: Show built image
+        run: docker images "${IMAGE_NAME}"
+
+  # ─────────────────────────────────────────────────────────
+  # 4. Trivy 취약점 스캔 (CRITICAL 발견 시 실패 → CD도 실행되지 않음)
+  # ─────────────────────────────────────────────────────────
+  scan:
+    name: Trivy Vulnerability Scan
+    needs: build
+    runs-on: [self-hosted, settlement]
+    steps:
+      # 서드파티 액션은 버전 태그가 아닌 전체 커밋 SHA로 고정합니다.
+      # (2026년 3월 trivy-action 태그 탈취 공급망 공격 대응 · Day 1 교안 참고)
+      # 액션 버전(uses: SHA)과 스캐너 버전(with: version)은 따로 관리합니다.
+      #   - 액션: Releases 페이지의 최신 릴리스 커밋 SHA (현재 v0.36.0)
+      #   - 스캐너: aquasecurity/trivy 최신 릴리스 (현재 v0.76.1, 2026-10-21)
+      - name: Trivy scan (CRITICAL만 게이트)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1        # 스캐너(Trivy) 버전 고정 — 액션 v0.36.0 기본값은 v0.70.0
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: table
+          severity: CRITICAL
+          exit-code: "1"          # CRITICAL 발견 시 파이프라인 실패
+          ignore-unfixed: true    # 패치 없는 취약점은 일단 통과 (정책에 따라 조정)
+
+      - name: Trivy scan (전체 리포트, 참고용)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.76.1        # 스캐너(Trivy) 버전 고정 — 액션 v0.36.0 기본값은 v0.70.0
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy-results.sarif
+          retention-days: 7

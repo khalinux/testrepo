@@ -1,0 +1,27 @@
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: pyflakes/pycodestyle 기본, I: import 정렬, B: bugbear (흔한 버그 패턴)
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]  # line-length는 black이 이미 강제하므로 중복 경고 무시
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["settlement"]
+branch = true
+
+[tool.coverage.report]
+# 커버리지 계산에서 제외할 라인 (실무 도달 불가 코드 등)
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

@@ -1,0 +1,28 @@
+# Lab 02 · .gitignore 예시 (Python 프로젝트)
+# 사용법: cp gitignore-sample <내 저장소>/.gitignore
+#
+# Git에 올리지 말아야 할 것:
+#   ① 다시 만들 수 있는 것 (가상환경, 캐시, 빌드 결과)
+#   ② 비밀 정보 (비밀번호, 토큰, 키)
+#   ③ 개인 환경 파일 (IDE 설정, OS 파일)
+
+# ① 가상환경 · 캐시 · 리포트
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ② 비밀 정보
+.env
+*.pem
+*.key
+
+# ③ 개인 환경
+.vscode/
+.idea/
+.DS_Store
+scripts/
