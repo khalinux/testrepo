@@ -6,7 +6,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Dict, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,9 +20,10 @@ class OrderStatus(str, Enum):
 
 class MerchantGrade(str, Enum):
     NORMAL = "normal"
-    VIP    = "vip"
+    VIP = "vip"
 
-VIP_FEE_RATE   = Decimal("0.02")   # VIP 판매자 수수료율 2%
+
+VIP_FEE_RATE = Decimal("0.02")  # VIP 판매자 수수료율 2%
 
 
 class SettlementStatus(str, Enum):
@@ -55,7 +56,8 @@ class Order(BaseModel):
     @property
     def applied_fee_rate(self) -> Decimal:
         """실제 적용 수수료율 - VIP 판매자는 2%"""
-        if self.merchant_grade == MerchantGrade.VIP: return VIP_FEE_RATE
+        if self.merchant_grade == MerchantGrade.VIP:
+            return VIP_FEE_RATE
         return self.fee_rate
 
     @property
