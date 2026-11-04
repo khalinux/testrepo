@@ -24,7 +24,7 @@ spec:
             - containerPort: 8000
           livenessProbe:
             httpGet:
-              path: /health
+              path: /notfound
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 15
