@@ -8,6 +8,6 @@ spec:
     app: settlement
   ports:
     - port: 80
-      targetPort: 8000
+      targetPort: 8080
 # kind는 클러스터 외부에서 바로 접근이 안 되므로 확인은 포트포워딩으로:
 #   kubectl port-forward svc/settlement -n settlement 8000:80
