@@ -18,6 +18,14 @@ class OrderStatus(str, Enum):
     REFUNDED = "refunded"
 
 
+class MerchantGrade(str, Enum):
+    NORMAL = "normal"
+    VIP = "vip"
+
+
+VIP_FEE_RATE = Decimal("0.02")  # VIP 판매자 수수료율 2%
+
+
 class SettlementStatus(str, Enum):
     PENDING = "pending"
     PROCESSING = "processing"
@@ -36,6 +44,7 @@ class Order(BaseModel):
     status: OrderStatus = Field(default=OrderStatus.PENDING)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = None
+    merchant_grade: MerchantGrade = Field(default=MerchantGrade.NORMAL, description="판매자 등급")
 
     @field_validator("amount")
     @classmethod
@@ -45,9 +54,16 @@ class Order(BaseModel):
         return v
 
     @property
+    def applied_fee_rate(self) -> Decimal:
+        """실제 적용 수수료율 - VIP 판매자는 2%"""
+        if self.merchant_grade == MerchantGrade.VIP:
+            return VIP_FEE_RATE
+        return self.fee_rate
+
+    @property
     def fee_amount(self) -> Decimal:
-        """수수료 = 주문금액 × 수수료율 (원 단위 반올림)"""
-        return (self.amount * self.fee_rate).quantize(Decimal("1"))
+        """수수료 = 주문금액 × 적용 수수료율 (원 단위 반올림)"""
+        return (self.amount * self.applied_fee_rate).quantize(Decimal("1"))
 
     @property
     def net_amount(self) -> Decimal:
