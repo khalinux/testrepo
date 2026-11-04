@@ -53,14 +53,14 @@ USER appuser
 ENV PATH=/home/appuser/.local/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8080
 
 EXPOSE ${PORT}
 
 # 쿠버네티스 liveness probe 와 연동
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c \
-        "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" \
+        "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" \
     || exit 1
 
 # 주의 1) JSON 형식 CMD를 여러 줄로 나누려면 줄 끝에 \ 가 필요합니다 (없으면 빌드 오류)
@@ -68,5 +68,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 #         워커가 2개 이상이면 프로세스마다 데이터가 따로 있어 주문 생성 → 완료 요청이 404가 될 수 있음
 CMD ["uvicorn", "settlement.main:app", \
      "--host", "0.0.0.0", \
-     "--port", "8000", \
+     "--port", "8080", \
      "--workers", "1"]
