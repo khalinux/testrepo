@@ -1,0 +1,133 @@
+# ─────────────────────────────────────────────────────────────
+# CD · kind 배포  (.github/workflows/cd.yml)
+#
+#   CI(ci.yml)가 main에서 성공하면 자동 실행 → kind 클러스터(settlement-local)에 배포
+#
+#   흐름: 이미지 확인 → kind load → kubectl apply → rollout 대기 → 헬스체크
+#         실패하면 이전 버전으로 자동 롤백 (kubectl rollout undo)
+#
+#   - 레지스트리 없이, CI가 같은 VM에서 만든 settlement:<커밋 SHA> 이미지를 kind 노드에 직접 넣습니다.
+#   - Actions 탭에서 "Run workflow"로 특정 커밋 SHA를 지정해 수동 재배포 · 롤백할 수도 있습니다.
+#
+#   ※ workflow_run 트리거는 이 파일이 기본 브랜치(main)에 있어야 동작합니다.
+# ─────────────────────────────────────────────────────────────
+name: CD · kind 배포
+
+on:
+  workflow_run:
+    workflows: ["CI · 정산 시스템"]   # ci.yml 의 name 과 정확히 같아야 함
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "배포할 이미지 태그 (커밋 SHA 40자리). 비우면 main 최신 커밋"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# 배포는 겹치지 않게 한 번에 하나씩, 진행 중인 배포는 끊지 않음
+concurrency:
+  group: cd-settlement-local
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: settlement
+  KIND_CLUSTER: settlement-local
+  K8S_NAMESPACE: settlement
+
+jobs:
+  deploy:
+    name: Deploy to kind (settlement-local)
+    # 자동 실행: CI가 성공했고, PR이 아닌 push(또는 수동 실행)로 돌았던 CI일 때만
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
+    runs-on: [self-hosted, settlement]
+    steps:
+      # CI가 검사한 바로 그 커밋의 매니페스트(k8s/)를 사용
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.image_tag || github.sha }}
+
+      - name: 배포할 이미지 태그 결정
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          TAG="${RUN_SHA:-${INPUT_TAG:-$GITHUB_SHA}}"
+          echo "IMAGE_TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "배포 대상: ${IMAGE_NAME}:${TAG}"
+
+      - name: 이미지 존재 확인 (CI가 같은 VM에서 빌드한 이미지)
+        run: |
+          docker image inspect "${IMAGE_NAME}:${IMAGE_TAG}" > /dev/null \
+            || { echo "::error::이미지 ${IMAGE_NAME}:${IMAGE_TAG} 가 없습니다. 해당 커밋의 CI(build job)가 이 runner에서 성공했는지 확인하세요."; exit 1; }
+
+      - name: kind 클러스터 컨텍스트 확인
+        run: |
+          kind get clusters | grep -qx "${KIND_CLUSTER}" \
+            || { echo "::error::kind 클러스터 '${KIND_CLUSTER}' 가 존재하지 않습니다"; exit 1; }
+          kubectl config use-context "kind-${KIND_CLUSTER}"
+
+      - name: 이미지를 kind 노드로 직접 로드 (레지스트리 미사용)
+        run: kind load docker-image "${IMAGE_NAME}:${IMAGE_TAG}" --name "${KIND_CLUSTER}"
+
+      - name: 네임스페이스 생성 (없으면)
+        run: kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+      # deployment.yaml의 image: settlement:latest 를 이번 커밋 SHA 태그로 바꿔서 적용합니다.
+      # (apply 후 set image를 따로 하면 배포 이력이 2개씩 쌓여 rollout undo가 엉뚱한 버전으로 돌아갑니다)
+      - name: 매니페스트 적용 (이미지 태그 = 커밋 SHA)
+        id: apply
+        run: |
+          kubectl apply -n "${K8S_NAMESPACE}" -f k8s/service.yaml
+          sed "s|image: ${IMAGE_NAME}:latest|image: ${IMAGE_NAME}:${IMAGE_TAG}|" k8s/deployment.yaml \
+            | kubectl apply -n "${K8S_NAMESPACE}" -f -
+          kubectl annotate deployment/settlement -n "${K8S_NAMESPACE}" \
+            kubernetes.io/change-cause="CD ${IMAGE_TAG} (run ${GITHUB_RUN_NUMBER})" --overwrite
+
+      - name: 롤아웃 대기 (120초 안에 Ready가 안 되면 실패)
+        run: kubectl rollout status deployment/settlement -n "${K8S_NAMESPACE}" --timeout=120s
+
+      - name: 헬스체크 (/health, /ready → HTTP 200)
+        run: |
+          PF_LOG="/tmp/pf-${GITHUB_RUN_ID}.log"
+          kubectl port-forward svc/settlement -n "${K8S_NAMESPACE}" 18000:80 > "${PF_LOG}" 2>&1 &
+          PF_PID=$!
+          trap 'kill ${PF_PID} 2>/dev/null || true' EXIT
+          for _ in $(seq 1 15); do
+            if curl -fsS http://localhost:18000/health && curl -fsS http://localhost:18000/ready; then
+              echo; echo "헬스체크 성공"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::헬스체크 실패"; cat "${PF_LOG}"; exit 1
+
+      - name: 실패 시 자동 롤백 (이전 버전으로)
+        if: failure() && steps.apply.outcome == 'success'
+        run: |
+          kubectl rollout undo deployment/settlement -n "${K8S_NAMESPACE}" \
+            || { echo "되돌릴 이전 버전이 없습니다 (첫 배포)"; exit 0; }
+          kubectl rollout status deployment/settlement -n "${K8S_NAMESPACE}" --timeout=120s
+
+      - name: 배포 결과 요약
+        if: always()
+        run: |
+          {
+            echo "## CD · kind 배포 결과"
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 이미지 | \`${IMAGE_NAME}:${IMAGE_TAG}\` |"
+            echo "| 클러스터 | \`${KIND_CLUSTER}\` / 네임스페이스 \`${K8S_NAMESPACE}\` |"
+            echo "| 작업 상태 | ${{ job.status }} |"
+            echo
+            echo '```'
+            kubectl get pods -n "${K8S_NAMESPACE}" -o wide 2>&1 || true
+            echo
+            kubectl rollout history deployment/settlement -n "${K8S_NAMESPACE}" 2>&1 | tail -5 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
